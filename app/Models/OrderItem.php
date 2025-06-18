@@ -12,18 +12,19 @@ class OrderItem extends Model
     protected $fillable = [
         'order_id',
         'product_id',
-        'product_variant_id',
+        'product_variant_id',  // Make sure this is nullable in the migration
         'product_name',
         'variant_details',
         'price',
         'quantity',
-        'subtotal',
+        'subtotal'
     ];
 
     protected $casts = [
+        'variant_details' => 'array',
         'price' => 'decimal:2',
         'subtotal' => 'decimal:2',
-        'variant_details' => 'array',
+        'product_variant_id' => 'integer',  // Add this to cast as integer, but will cast null as null
     ];
 
     public function order()

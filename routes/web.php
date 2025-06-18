@@ -56,9 +56,10 @@ Route::middleware('auth')->group(function () {
 });
 
 // Public form routes (no auth required)
-Route::get('forms/{form}', [FormController::class, 'publicForm'])->name('forms.public');
-Route::post('forms/{form}/response', [FormController::class, 'storeResponse'])->name('forms.response.store');
-Route::get('forms/{form}/thankyou', [FormController::class, 'thankYou'])->name('forms.thankyou');
+Route::get('forms/{form}', [FormController::class, 'showPublic'])->name('forms.public');
+Route::post('forms/{form}/submit', [FormController::class, 'submitPublic'])->name('forms.submit');
+Route::get('forms/response/{formResponse}/thank-you', [FormController::class, 'thankYou'])->name('forms.thank-you');
+Route::get('orders/{order}/thank-you', [FormController::class, 'orderThankYou'])->name('orders.thank-you');
 
 // Product routes
 Route::get('projects/{project}/products', [ProductController::class, 'index'])->name('projects.products.index');

@@ -11,6 +11,7 @@ class FormComponent extends Model
 
     protected $fillable = [
         'form_id',
+        'page',
         'type',
         'label',
         'order',
