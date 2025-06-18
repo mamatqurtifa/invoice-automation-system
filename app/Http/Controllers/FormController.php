@@ -14,11 +14,17 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Gate;
+use Carbon\Carbon;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+
 
 class FormController extends Controller
 {
-    use AuthorizesRequests;
+    use authorizesRequests;
     /**
      * Display a listing of the forms for a project.
      */
@@ -50,6 +56,45 @@ class FormController extends Controller
     }
 
     /**
+     * Store a newly created form in storage.
+     */
+    public function store(Request $request, Project $project)
+    {
+        $this->authorize('update', $project);
+        
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'is_active' => 'boolean',
+            'is_template' => 'boolean',
+            'closing_date' => 'nullable|date',
+            'closing_time' => 'nullable|string',
+        ]);
+        
+        // Prepare closing_at datetime
+        $closingAt = null;
+        if (!empty($validated['closing_date'])) {
+            if (!empty($validated['closing_time'])) {
+                $closingAt = Carbon::parse($validated['closing_date'] . ' ' . $validated['closing_time']);
+            } else {
+                $closingAt = Carbon::parse($validated['closing_date'])->endOfDay();
+            }
+        }
+        
+        $form = Form::create([
+            'project_id' => $project->id,
+            'name' => $validated['name'],
+            'description' => $validated['description'],
+            'is_active' => $validated['is_active'] ?? false,
+            'is_template' => $validated['is_template'] ?? false,
+            'closing_at' => $closingAt,
+        ]);
+        
+        return redirect()->route('projects.forms.edit', [$project, $form])
+            ->with('success', 'Form created successfully. Add components to your form.');
+    }
+
+    /**
      * Show the form for editing the specified form.
      */
     public function edit(Project $project, Form $form = null, $templateId = null)
@@ -61,6 +106,44 @@ class FormController extends Controller
         }
         
         return view('forms.edit', compact('project', 'form', 'templateId'));
+    }
+
+    /**
+     * Update the specified form in storage.
+     */
+    public function update(Request $request, Project $project, Form $form)
+    {
+        $this->authorize('update', $form);
+        
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'is_active' => 'boolean',
+            'is_template' => 'boolean',
+            'closing_date' => 'nullable|date',
+            'closing_time' => 'nullable|string',
+        ]);
+        
+        // Prepare closing_at datetime
+        $closingAt = null;
+        if (!empty($validated['closing_date'])) {
+            if (!empty($validated['closing_time'])) {
+                $closingAt = Carbon::parse($validated['closing_date'] . ' ' . $validated['closing_time']);
+            } else {
+                $closingAt = Carbon::parse($validated['closing_date'])->endOfDay();
+            }
+        }
+        
+        $form->update([
+            'name' => $validated['name'],
+            'description' => $validated['description'],
+            'is_active' => $validated['is_active'] ?? false,
+            'is_template' => $validated['is_template'] ?? false,
+            'closing_at' => $closingAt,
+        ]);
+        
+        return redirect()->route('projects.forms.show', [$project, $form])
+            ->with('success', 'Form updated successfully');
     }
 
     /**
@@ -96,7 +179,7 @@ class FormController extends Controller
         $this->authorize('delete', $form);
         
         // Check if form has responses
-        if ($form->responses()->count() > 0) {
+        if ($form->responses()->count() > 0 && !$form->is_template) {
             return redirect()->route('projects.forms.show', [$project, $form])
                 ->with('error', 'Cannot delete form that has responses. You may deactivate it instead.');
         }
@@ -256,11 +339,8 @@ class FormController extends Controller
                     // Format: product_id:variant_id:quantity
                     $parts = explode(':', $productData['selection']);
                     $productId = $parts[0] ?? null;
-                    $variantId = $parts[1] ?? null;
+                    $variantId = !empty($parts[1]) ? (int)$parts[1] : null;
                     $quantity = $parts[2] ?? 1;
-                    
-                    // Fix for the SQL error - Convert empty variant ID to null
-                    $variantId = !empty($variantId) ? (int)$variantId : null;
                     
                     if ($productId) {
                         $product = Product::find($productId);
@@ -273,15 +353,12 @@ class FormController extends Controller
                                 if ($variant) {
                                     $price = $variant->getPrice();
                                     $variantDetails = $variant->attribute_values;
-                                } else {
-                                    // If variant not found, set to null
-                                    $variantId = null;
                                 }
                             }
                             
                             $orderItems[] = [
                                 'product_id' => $productId,
-                                'product_variant_id' => $variantId, // Will now be null or integer, not empty string
+                                'product_variant_id' => $variantId,
                                 'product_name' => $product->name,
                                 'variant_details' => $variantDetails,
                                 'price' => $price,
@@ -423,50 +500,37 @@ class FormController extends Controller
     }
 
     /**
-     * Create a form from a template.
+     * Display all responses for a form with detailed data.
      */
-    public function createFromTemplate(Project $project, Form $template)
-    {
-        $this->authorize('update', $project);
-        
-        return view('forms.create-from-template', [
-            'project' => $project,
-            'template' => $template,
-        ]);
-    }
-    
-    /**
-     * Show form templates.
-     */
-    public function templates(Project $project)
+    public function responses(Project $project, Form $form)
     {
         $this->authorize('view', $project);
         
-        $templates = Form::where('project_id', $project->id)
-            ->where('is_template', true)
+        $responses = $form->responses()
             ->orderBy('created_at', 'desc')
+            ->paginate(10);
+            
+        // Get components for the form (excluding layout components)
+        $components = $form->components()
+            ->whereNotIn('type', ['heading', 'paragraph', 'image', 'page_break'])
+            ->orderBy('page')
+            ->orderBy('order')
             ->get();
-        
-        $publicTemplates = Form::where('is_template', true)
-            ->where('is_active', true)
-            ->where('project_id', '!=', $project->id)
-            ->orderBy('created_at', 'desc')
-            ->get();
-        
-        return view('forms.templates', compact('project', 'templates', 'publicTemplates'));
+            
+        return view('forms.responses', compact('project', 'form', 'responses', 'components'));
     }
 
     /**
      * Export responses as CSV.
      */
-    public function exportResponses(Project $project, Form $form)
+    public function exportResponsesCSV(Project $project, Form $form)
     {
         $this->authorize('view', $project);
         
         // Get all responses for the form
         $responses = $form->responses()->orderBy('created_at', 'desc')->get();
         
-        // Get components for the form
+        // Get components for the form (excluding layout components)
         $components = $form->components()
             ->whereNotIn('type', ['heading', 'paragraph', 'image', 'page_break'])
             ->orderBy('page')
@@ -512,7 +576,7 @@ class FormController extends Controller
         }
         
         // Generate CSV
-        $filename = $this->slug($form->name) . '_responses_' . date('Ymd_His') . '.csv';
+        $filename = $this->slugify($form->name) . '_responses_' . date('Ymd_His') . '.csv';
         
         $handle = fopen('php://temp', 'r+');
         fputcsv($handle, $headers);
@@ -529,6 +593,78 @@ class FormController extends Controller
             'Content-Type' => 'text/csv',
             'Content-Disposition' => 'attachment; filename="' . $filename . '"',
         ]);
+    }
+    
+    /**
+     * Export responses as PDF.
+     */
+    public function exportResponsesPDF(Project $project, Form $form)
+    {
+        $this->authorize('view', $project);
+        
+        // Get all responses for the form
+        $responses = $form->responses()->orderBy('created_at', 'desc')->get();
+        
+        // Get components for the form (excluding layout components)
+        $components = $form->components()
+            ->whereNotIn('type', ['heading', 'paragraph', 'image', 'page_break'])
+            ->orderBy('page')
+            ->orderBy('order')
+            ->get();
+        
+        // Prepare data for PDF
+        $data = [
+            'form' => $form,
+            'components' => $components,
+            'responses' => $responses,
+            'project' => $project,
+            'generated_date' => Carbon::now()->format('Y-m-d H:i:s')
+        ];
+        
+        $pdf = PDF::loadView('forms.exports.pdf-responses', $data);
+        
+        // Set PDF options if needed
+        $pdf->setPaper('a4', 'landscape');
+        
+        // Generate PDF filename
+        $filename = $this->slugify($form->name) . '_responses_' . date('Ymd_His') . '.pdf';
+        
+        // Return PDF download
+        return $pdf->download($filename);
+    }
+    
+    /**
+     * Create a form from a template.
+     */
+    public function createFromTemplate(Project $project, Form $template)
+    {
+        $this->authorize('update', $project);
+        
+        return view('forms.create-from-template', [
+            'project' => $project,
+            'template' => $template,
+        ]);
+    }
+    
+    /**
+     * Show form templates.
+     */
+    public function templates(Project $project)
+    {
+        $this->authorize('view', $project);
+        
+        $templates = Form::where('project_id', $project->id)
+            ->where('is_template', true)
+            ->orderBy('created_at', 'desc')
+            ->get();
+        
+        $publicTemplates = Form::where('is_template', true)
+            ->where('is_active', true)
+            ->where('project_id', '!=', $project->id)
+            ->orderBy('created_at', 'desc')
+            ->get();
+        
+        return view('forms.templates', compact('project', 'templates', 'publicTemplates'));
     }
     
     /**
@@ -576,6 +712,36 @@ class FormController extends Controller
     }
     
     /**
+     * Save form as template
+     */
+    public function saveAsTemplate(Request $request, Project $project, Form $form)
+    {
+        $this->authorize('update', $form);
+        
+        $validated = $request->validate([
+            'template_name' => 'required|string|max:255',
+            'make_public' => 'nullable|boolean',
+        ]);
+        
+        // Create a new form as template
+        $template = $form->replicate();
+        $template->name = $validated['template_name'];
+        $template->is_template = true;
+        $template->is_active = $request->has('make_public');  // Make it active if it's public
+        $template->save();
+        
+        // Clone form components
+        foreach ($form->components as $component) {
+            $newComponent = $component->replicate();
+            $newComponent->form_id = $template->id;
+            $newComponent->save();
+        }
+        
+        return redirect()->route('projects.forms.show', [$project, $template])
+            ->with('success', 'Form saved as template successfully');
+    }
+    
+    /**
      * Convert form response to order.
      */
     public function createOrderFromResponse(Project $project, Form $form, FormResponse $response)
@@ -592,9 +758,101 @@ class FormController extends Controller
     }
     
     /**
-     * Helper function to convert a string to slug
+     * Store an order created from a form response.
      */
-    private function slug($string) {
-        return strtolower(trim(preg_replace('/[^A-Za-z0-9-]+/', '-', $string)));
+    public function storeOrderFromResponse(Request $request, Project $project, Form $form, FormResponse $response)
+    {
+        $this->authorize('update', $project);
+        
+        $validated = $request->validate([
+            'products' => 'required|array',
+            'products.*.product_id' => 'required|exists:products,id',
+            'products.*.variant_id' => 'nullable|exists:product_variants,id',
+            'products.*.quantity' => 'required|integer|min:1',
+            'note' => 'nullable|string',
+        ]);
+        
+        // Calculate order total
+        $totalAmount = 0;
+        $orderItems = [];
+        
+        foreach ($validated['products'] as $item) {
+            $product = Product::find($item['product_id']);
+            $price = $product->base_price;
+            $variantDetails = null;
+            
+            if (!empty($item['variant_id'])) {
+                $variant = ProductVariant::find($item['variant_id']);
+                if ($variant) {
+                    $price = $variant->getPrice();
+                    $variantDetails = $variant->attribute_values;
+                }
+            }
+            
+            $subtotal = $price * $item['quantity'];
+            $totalAmount += $subtotal;
+            
+            $orderItems[] = [
+                'product_id' => $item['product_id'],
+                'product_variant_id' => $item['variant_id'] ?? null,
+                'product_name' => $product->name,
+                'variant_details' => $variantDetails,
+                'price' => $price,
+                'quantity' => $item['quantity'],
+                'subtotal' => $subtotal,
+            ];
+        }
+        
+        // Create the order
+        $order = Order::create([
+            'project_id' => $project->id,
+            'form_response_id' => $response->id,
+            'order_number' => Order::generateOrderNumber(),
+            'guest_name' => $response->guest_name,
+            'guest_email' => $response->guest_email,
+            'guest_phone' => $response->guest_phone,
+            'total_amount' => $totalAmount,
+            'amount_paid' => 0,
+            'status' => 'pending',
+            'notes' => $validated['note'],
+        ]);
+        
+        // Create order items
+        foreach ($orderItems as $item) {
+            OrderItem::create([
+                'order_id' => $order->id,
+                'product_id' => $item['product_id'],
+                'product_variant_id' => $item['product_variant_id'],
+                'product_name' => $item['product_name'],
+                'variant_details' => $item['variant_details'],
+                'price' => $item['price'],
+                'quantity' => $item['quantity'],
+                'subtotal' => $item['subtotal'],
+            ]);
+        }
+        
+        return redirect()->route('projects.orders.show', [$project, $order])
+            ->with('success', 'Order created successfully from form response.');
+    }
+    
+    /**
+     * Helper function to create a URL-friendly string
+     */
+    private function slugify($text) 
+    {
+        // Replace non letter or digit with -
+        $text = preg_replace('~[^\pL\d]+~u', '-', $text);
+        // Transliterate
+        $text = iconv('utf-8', 'us-ascii//TRANSLIT', $text);
+        // Remove unwanted characters
+        $text = preg_replace('~[^-\w]+~', '', $text);
+        // Trim
+        $text = trim($text, '-');
+        // Remove duplicate -
+        $text = preg_replace('~-+~', '-', $text);
+        // Lowercase
+        $text = strtolower($text);
+        
+        return $text ?: 'form';
     }
 }
